@@ -47,6 +47,38 @@ async def cmd_setready(message: Message):
     )
 
 
+@router.message(Command("testapi"))
+async def cmd_testapi(message: Message):
+    """Админ-команда: тестовый запрос к API."""
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    import os
+    from openai import OpenAI
+
+    api_key = os.getenv("MIMO_API_KEY")
+    base_url = os.getenv("MIMO_BASE_URL")
+    model = os.getenv("MIMO_MODEL")
+
+    await message.answer(
+        f"🔍 <b>Тест API</b>\n"
+        f"URL: <code>{base_url}</code>\n"
+        f"MODEL: <code>{model}</code>\n"
+        f"KEY: <code>{(api_key[:15] + '...') if api_key else 'НЕТ'}</code>"
+    )
+
+    try:
+        client = OpenAI(api_key=api_key, base_url=base_url)
+        r = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "привет"}],
+            max_tokens=20,
+        )
+        await message.answer(f"✅ <b>ОТВЕТ:</b>\n{r.choices[0].message.content}")
+    except Exception as e:
+        await message.answer(f"❌ <b>ОШИБКА:</b>\n<code>{type(e).__name__}: {e}</code>")
+
+
 @router.callback_query(F.data == "start_learning")
 async def on_start_learning(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
@@ -73,60 +105,53 @@ async def on_start_learning(callback: CallbackQuery):
 
 
 @router.message(F.text | F.sticker | F.animation | F.photo)
-async def collect_messages(message: Message):
-    """Сбор сообщений во время обучения."""
-    status = await db.get_state("learning_status", "idle")
-    if status != "collecting":
-        return
-
-    if message.text:
-        username = message.from_user.username or message.from_user.first_name or "unknown"
-        await db.save_message(message.from_user.id, username, message.text)
-
-    if message.sticker:
-        await db.save_media(message.sticker.file_id, "sticker")
-
-    if message.animation:
-        await db.save_media(message.animation.file_id, "animation")
-
-    if message.photo:
-        await db.save_media(message.photo[-1].file_id, "photo")
-
-
-@router.message(F.text)
-async def reply_messages(message: Message):
-    """Отвечает в группе после обучения."""
-    if message.text.startswith("/"):
+async def handle_message(message: Message):
+    """Единый обработчик: собирает при collecting, отвечает при ready."""
+    if message.text and message.text.startswith("/"):
         return
     if message.chat.id == message.from_user.id:
         return
 
     status = await db.get_state("learning_status", "idle")
-    if status != "ready":
+
+    # Режим сбора
+    if status == "collecting":
+        if message.text:
+            username = message.from_user.username or message.from_user.first_name or "unknown"
+            await db.save_message(message.from_user.id, username, message.text)
+        if message.sticker:
+            await db.save_media(message.sticker.file_id, "sticker")
+        if message.animation:
+            await db.save_media(message.animation.file_id, "animation")
+        if message.photo:
+            await db.save_media(message.photo[-1].file_id, "photo")
         return
 
-    # 5% шанс — вместо ответа кинуть случайное медиа
-    if random.random() < 0.05:
-        media = await db.get_random_media()
-        if media:
-            file_id, media_type = media
-            try:
-                if media_type == "sticker":
-                    await message.answer_sticker(file_id)
-                elif media_type == "animation":
-                    await message.answer_animation(file_id)
-                elif media_type == "photo":
-                    await message.answer_photo(file_id)
-                return
-            except Exception:
-                pass
+    # Режим ответов
+    if status == "ready" and message.text:
+        # 5% шанс — кинуть случайное медиа
+        if random.random() < 0.05:
+            media = await db.get_random_media()
+            if media:
+                file_id, media_type = media
+                try:
+                    if media_type == "sticker":
+                        await message.answer_sticker(file_id)
+                    elif media_type == "animation":
+                        await message.answer_animation(file_id)
+                    elif media_type == "photo":
+                        await message.answer_photo(file_id)
+                    return
+                except Exception as e:
+                    print(f"Ошибка отправки медиа: {e}")
 
-    try:
-        reply = await generate_reply(message.text)
-        if reply:
-            await message.reply(reply)
-    except Exception as e:
-        print(f"Ошибка генерации: {e}")
+        # Основной ответ через MiMo
+        try:
+            reply = await generate_reply(message.text)
+            if reply:
+                await message.reply(reply)
+        except Exception as e:
+            print(f"Ошибка генерации: {e}")
 
 
 async def check_learning_done(bot):
