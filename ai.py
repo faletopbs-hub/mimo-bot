@@ -7,35 +7,37 @@ client = AsyncOpenAI(
     base_url=MIMO_BASE_URL,
 )
 
-SYSTEM_PROMPT = """Ты — участник Telegram-чата. Твоя задача — отвечать в стиле этой группы.
-
-Вот примеры сообщений из чата (для изучения стиля, сленга и манеры общения):
----
-{examples}
----
-
-Правила:
-1. Отвечай КОРОТКО — 1-2 предложения, максимум 15 слов.
-2. Используй тот же сленг, маты, манеру, что в примерах.
-3. НЕ копируй примеры дословно — комбинируй их элементы по-новому.
-4. Если не знаешь, что ответить — ответь коротко и в тему.
-5. Не будь вежливым ассистентом — ты свой в этой компании.
-"""
+# Жёсткая инструкция — не меняется через /setprompt
+HARD_RULES = """Твоё имя — Федя. Ты всегда Федя. Если к тебе обращаются "Федя" — отвечай обязательно, даже если сообщение начинается с этого слова.
+Отвечай коротко — 1-2 предложения, максимум 15 слов. Не будь вежливым ассистентом — ты свой в этой компании.
+Сейчас тебе пишет: {user_name} ({user_gender}). Обращайся к нему соответственно."""
 
 
-async def generate_reply(user_message: str) -> str:
+async def generate_reply(user_id: int, user_message: str) -> str:
     history = await db.get_last_messages(limit=40)
     examples = "\n".join(f"{username}: {text}" for username, text in history if text)
 
-    if not examples:
-        return ""
+    custom_prompt = await db.get_prompt()
 
-    prompt = SYSTEM_PROMPT.format(examples=examples)
+    user = await db.get_user(user_id)
+    if user:
+        user_name, user_gender = user
+    else:
+        user_name, user_gender = "незнакомец", "неизвестно"
+
+    parts = []
+    if custom_prompt:
+        parts.append(custom_prompt)
+    parts.append(HARD_RULES.format(user_name=user_name, user_gender=user_gender))
+    if examples:
+        parts.append(f"Примеры стиля общения в чате:\n---\n{examples}\n---")
+
+    system_content = "\n\n".join(parts)
 
     response = await client.chat.completions.create(
         model=MIMO_MODEL,
         messages=[
-            {"role": "system", "content": prompt},
+            {"role": "system", "content": system_content},
             {"role": "user", "content": user_message},
         ],
         temperature=0.9,
